@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-Arrow key steering control webserver for Comma 3X.
-Uses only standard library - no websockets needed.
+Arrow key steering control webserver with live video for Comma 3X.
 """
 import json
 import threading
 import time
+import io
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+import cv2
+import numpy as np
+from PIL import Image
+
 from cereal import messaging
+from msgq.visionipc import VisionIpcClient, VisionStreamType
 
 PORT = 3000
 SEND_RATE = 100
+VIDEO_FPS = 15
 
 HTML = '''<!DOCTYPE html>
 <html>
@@ -23,38 +29,50 @@ HTML = '''<!DOCTYPE html>
         body {
             font-family: system-ui, sans-serif;
             background: #1a1a2e; color: #eee;
-            height: 100vh;
+            min-height: 100vh;
             display: flex; flex-direction: column;
-            align-items: center; justify-content: center;
+            align-items: center; padding: 20px;
             user-select: none;
         }
-        h1 { margin-bottom: 20px; color: #00d4ff; }
+        h1 { margin-bottom: 15px; color: #00d4ff; font-size: 24px; }
+        .video-container {
+            width: 100%; max-width: 640px;
+            margin-bottom: 20px;
+            border-radius: 12px; overflow: hidden;
+            background: #000;
+        }
+        .video-container img {
+            width: 100%; display: block;
+        }
         .bar-container {
-            width: 400px; height: 60px;
-            background: #2a2a4a; border-radius: 30px;
-            position: relative; margin-bottom: 30px;
+            width: 100%; max-width: 400px; height: 50px;
+            background: #2a2a4a; border-radius: 25px;
+            position: relative; margin-bottom: 20px;
         }
         .bar {
-            position: absolute; top: 10px; bottom: 10px;
+            position: absolute; top: 8px; bottom: 8px;
             background: linear-gradient(90deg, #00d4ff, #00ff88);
-            border-radius: 20px; transition: all 0.05s;
+            border-radius: 17px; transition: all 0.05s;
         }
         .center { position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: #666; }
-        .value { font-size: 48px; font-weight: bold; font-family: monospace; margin-bottom: 40px; }
-        .keys { display: flex; gap: 20px; }
+        .value { font-size: 36px; font-weight: bold; font-family: monospace; margin-bottom: 20px; }
+        .keys { display: flex; gap: 15px; }
         .key {
-            width: 80px; height: 80px;
+            width: 70px; height: 70px;
             background: #2a2a4a; border: 2px solid #444;
             border-radius: 12px;
             display: flex; align-items: center; justify-content: center;
-            font-size: 32px; transition: all 0.1s;
+            font-size: 28px; transition: all 0.1s;
         }
         .key.active { background: #00d4ff; border-color: #00d4ff; color: #1a1a2e; }
-        .info { margin-top: 40px; color: #666; font-size: 14px; }
+        .info { margin-top: 20px; color: #666; font-size: 12px; }
     </style>
 </head>
 <body>
-    <h1>Comma Steering</h1>
+    <h1>Comma Steering Control</h1>
+    <div class="video-container">
+        <img src="/video" alt="Road Camera">
+    </div>
     <div class="bar-container">
         <div class="center"></div>
         <div class="bar" id="bar"></div>
@@ -103,6 +121,7 @@ update();
 </html>'''
 
 
+# Steering controller
 class Controller:
     def __init__(self):
         self.pm = messaging.PubMaster(['testJoystick'])
@@ -124,15 +143,87 @@ class Controller:
             time.sleep(1.0 / SEND_RATE)
 
 
+# Video streamer
+class VideoStreamer:
+    def __init__(self):
+        self.latest_frame = None
+        self.lock = threading.Lock()
+        self.running = True
+
+    def camera_loop(self):
+        """Subscribe to camera and encode frames as JPEG."""
+        vipc = VisionIpcClient("camerad", VisionStreamType.ROAD, False)
+        
+        while self.running:
+            if not vipc.connect(False):
+                time.sleep(0.1)
+                continue
+                
+            while vipc.is_connected() and self.running:
+                buf = vipc.recv()
+                if buf is None:
+                    continue
+                    
+                try:
+                    # Get frame dimensions from buffer
+                    w, h = buf.width, buf.height
+                    
+                    # Convert YUV420 to RGB
+                    yuv = np.frombuffer(buf.data, dtype=np.uint8).reshape((h * 3 // 2, w))
+                    rgb = cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB_NV12)
+                    
+                    # Resize for bandwidth (optional)
+                    rgb = cv2.resize(rgb, (640, 360))
+                    
+                    # Encode as JPEG
+                    img = Image.fromarray(rgb)
+                    buf_io = io.BytesIO()
+                    img.save(buf_io, format='JPEG', quality=70)
+                    
+                    with self.lock:
+                        self.latest_frame = buf_io.getvalue()
+                        
+                except Exception as e:
+                    print(f"Frame error: {e}")
+                    
+                time.sleep(1.0 / VIDEO_FPS)
+
+    def get_frame(self):
+        with self.lock:
+            return self.latest_frame
+
+
 ctrl = Controller()
+video = VideoStreamer()
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html')
-        self.end_headers()
-        self.wfile.write(HTML.encode())
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(HTML.encode())
+            
+        elif self.path == '/video':
+            self.send_response(200)
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            
+            try:
+                while True:
+                    frame = video.get_frame()
+                    if frame:
+                        self.wfile.write(b'--frame\r\n')
+                        self.wfile.write(b'Content-Type: image/jpeg\r\n\r\n')
+                        self.wfile.write(frame)
+                        self.wfile.write(b'\r\n')
+                    time.sleep(1.0 / VIDEO_FPS)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        else:
+            self.send_error(404)
 
     def do_POST(self):
         if self.path == '/steer':
@@ -148,7 +239,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     print('=' * 40)
-    print('Comma Steering Control')
+    print('Comma Steering Control + Video')
     print('=' * 40)
     print()
     print('SSH tunnel:')
@@ -157,7 +248,13 @@ def main():
     print('Then open: http://localhost:3000')
     print()
 
+    # Start steering loop
     threading.Thread(target=ctrl.loop, daemon=True).start()
+    
+    # Start video capture
+    threading.Thread(target=video.camera_loop, daemon=True).start()
+    
+    # Start HTTP server
     HTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
 
 
