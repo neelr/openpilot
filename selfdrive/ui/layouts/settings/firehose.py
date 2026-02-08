@@ -25,6 +25,9 @@ INSTRUCTIONS = tr_noop(
 
 
 class FirehoseLayout(FirehoseLayoutBase):
+  def _get_status(self):
+    return tr("DISABLED"), self.GRAY
+
   def __init__(self):
     super().__init__()
     self._scroll_panel = GuiScrollPanel()

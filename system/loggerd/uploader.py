@@ -127,6 +127,7 @@ class Uploader:
         yield name, key, fn
 
   def next_file_to_upload(self, metered: bool) -> tuple[str, str, str] | None:
+    return None  # Firehose disabled
     upload_files = list(self.list_upload_files(metered))
 
     for name, key, fn in upload_files:
