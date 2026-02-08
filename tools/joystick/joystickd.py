@@ -29,8 +29,8 @@ def joystickd_thread():
     cc_msg = messaging.new_message('carControl')
     cc_msg.valid = True
     CC = cc_msg.carControl
-    CC.enabled = sm['selfdriveState'].enabled
-    CC.latActive = sm['selfdriveState'].active and not sm['carState'].steerFaultTemporary and not sm['carState'].steerFaultPermanent
+    CC.enabled = True  # Force enabled for joystick control
+    CC.latActive = not sm['carState'].steerFaultTemporary and not sm['carState'].steerFaultPermanent  # Bypass engagement requirement
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in sm['onroadEvents']) and CP.openpilotLongitudinalControl
     CC.cruiseControl.cancel = sm['carState'].cruiseState.enabled and (not CC.enabled or not CP.pcmCruise)
     CC.hudControl.leadDistanceBars = 2
