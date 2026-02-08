@@ -152,7 +152,7 @@ class VideoStreamer:
 
     def camera_loop(self):
         """Subscribe to camera and encode frames as JPEG."""
-        vipc = VisionIpcClient("camerad", VisionStreamType.ROAD, False)
+        vipc = VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_ROAD, False)
         
         while self.running:
             if not vipc.connect(False):
